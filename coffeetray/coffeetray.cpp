@@ -53,8 +53,10 @@ public:
 
 class Coffeetray {
 public:
+	caffe::NetParameter net_param;
 	caffe::SolverParameter solver_param;
 	caffe::shared_ptr<caffe::Solver<float> > solver;
+	caffe::shared_ptr<Net<float>> net;
 
 	struct NoArgException {};
 
@@ -62,7 +64,15 @@ public:
 		try {
 			std::vector<std::string> tokens;
 			auto eat = [&]{
+				if (tokens.size() == 0) {
+					throw NoArgException();
+				}
+				auto first = tokens[0];
 				tokens.erase(tokens.begin(), tokens.begin() + 1);
+				return first;
+			};
+			auto avail = [&]{
+				return tokens.size() > 0;
 			};
 			auto peek = [&]{
 				if (tokens.size() == 0) {
@@ -80,8 +90,7 @@ public:
 				}
 			};
 			auto layer_commands = [&](caffe::shared_ptr<Net<float>> net) {
-				auto layer = solver->net()->layer_by_name(peek());
-				eat();
+				auto layer = solver->net()->layer_by_name(eat());
 				if (match("reset")) {
 					auto mem_layer = boost::static_pointer_cast<caffe::MemoryDataLayer<float>>(layer);
 					struct Pack {
@@ -96,8 +105,7 @@ public:
 				return false;
 			};
 			auto blob_commands = [&](caffe::shared_ptr<Net<float>> net) {
-				auto blob = net->blob_by_name(peek());
-				eat();
+				auto blob = net->blob_by_name(eat());
 				if (match("mutable_data")) {
 					buffer = blob->mutable_cpu_data();
 					return true;
@@ -112,6 +120,34 @@ public:
 				}
 				else if (match("diff")) {
 					buffer = blob->cpu_diff();
+					return true;
+				}
+				return false;
+			};
+			auto net_commands = [&](caffe::shared_ptr<Net<float>> net) {
+				if (match("layer")) {
+					return layer_commands(net);
+				}
+				else if (match("blob")) {
+					return blob_commands(net);
+				}
+				else if (match("forward")) {
+					float loss;
+					net->ForwardPrefilled(&loss);
+					buffer = loss;
+					return true;
+				}
+				else if (match("copy")) {
+					if (avail()) {
+						net->CopyTrainedLayersFrom(eat());
+					}
+					else {
+						net->CopyTrainedLayersFrom(net_param);
+					}
+					return true;
+				}
+				else if (match("to_net_param")) {
+					net->ToProto(&net_param);
 					return true;
 				}
 				return false;
@@ -132,6 +168,10 @@ public:
 				else if (match("get")) {
 					return solver_param.SerializeToArray(buffer.data, buffer.size);
 				}
+				else if (match("create")) {
+					solver.reset(caffe::SolverRegistry<float>::CreateSolver(solver_param));
+					return true;
+				}
 				else {
 					return false;
 				}
@@ -142,21 +182,46 @@ public:
 						solver_param.set_device_id(gpus[0]);
 					}
 					return true;
-				}
-				else if (match("create")) {					
-					solver.reset(caffe::SolverRegistry<float>::CreateSolver(solver_param));
-					return true;
-				}
+				}				
 				else if (match("step")) {
 					solver->Step(buffer);
 					return true;
 				}
-				else if (match("layer")) {
-					return layer_commands(solver->net());
+				else if (match("net")) {
+					return net_commands(solver->net());
 				}
-				else if (match("blob")) {
-					return blob_commands(solver->net());
+			}
+			else if (match("net_param")) {
+				if (match("set_array")) {
+					return net_param.ParseFromArray(buffer.data, buffer.size);
 				}
+				else if (match("set_string")) {
+					return google::protobuf::TextFormat::ParseFromString(buffer, &net_param);
+					//return solver_param.ParseFromString(buffer);
+				}
+				else if (match("get_bytesize")) {
+					buffer = net_param.ByteSize();
+					return true;
+				}
+				else if (match("get")) {
+					return net_param.SerializeToArray(buffer.data, buffer.size);
+				}
+				else if (match("create")) {
+					if (avail()) {
+						auto net_file = eat();
+						net.reset(new caffe::Net<float>(net_file, Phase::TEST));						
+					}
+					else {
+						net.reset(new caffe::Net<float>(net_param));
+					}					
+					return true;
+				}
+				else {
+					return false;
+				}
+			}
+			else if (match("net")) {				
+				return net_commands(net);
 			}
 		}
 		catch (NoArgException&) {
